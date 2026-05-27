@@ -1,0 +1,257 @@
+name: Flutter CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flutter-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(awk -F': ' '/^version:/ {print $2}' pubspec.yaml | head -n 1 | cut -d+ -f1)"
+          fi
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Package APK
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk "dist/TWC-android-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/TWC-android-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  ios:
+    name: iOS Unsigned IPA
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          architecture: arm64
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(awk -F': ' '/^version:/ {print $2}' pubspec.yaml | head -n 1 | cut -d+ -f1)"
+          fi
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned IPA
+        run: flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          mkdir -p dist/Payload
+          cp -R build/ios/iphoneos/Runner.app dist/Payload/
+          (cd dist && zip -qry "TWC-ios-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}.ipa" Payload)
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: dist/TWC-ios-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows Portable ZIP
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Compute build metadata
+        id: meta
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+            $versionLine = Select-String -Path pubspec.yaml -Pattern '^version:\s*(.+)$' | Select-Object -First 1
+            $version = ($versionLine.Matches[0].Groups[1].Value -split '\+')[0]
+          }
+          $sha = (git rev-parse --short=8 HEAD).Trim()
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build Windows app
+        run: flutter build windows --release
+
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $version = "${{ steps.meta.outputs.version }}"
+          $sha = "${{ steps.meta.outputs.sha }}"
+          Compress-Archive `
+            -Path build/windows/x64/runner/Release/* `
+            -DestinationPath "dist/TWC-windows-v$version-$sha-portable.zip" `
+            -Force
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-zip
+          path: dist/TWC-windows-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}-portable.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  macos:
+    name: macOS arm64 DMG
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          architecture: arm64
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(awk -F': ' '/^version:/ {print $2}' pubspec.yaml | head -n 1 | cut -d+ -f1)"
+          fi
+          SHORT_SHA="$(git rev-parse --short=8 HEAD)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS app
+        run: flutter build macos --release
+
+      - name: Package DMG
+        run: |
+          set -euo pipefail
+          mkdir -p dist/dmg-root
+          APP_PATH="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' -print -quit)"
+          cp -R "$APP_PATH" dist/dmg-root/
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create \
+            -volname "TWC" \
+            -srcfolder dist/dmg-root \
+            -ov \
+            -format UDZO \
+            "dist/TWC-macos-arm64-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}.dmg"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64-dmg
+          path: dist/TWC-macos-arm64-v${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.sha }}.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs:
+      - android
+      - ios
+      - windows
+      - macos
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: release-assets/android
+
+      - name: Download iOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-unsigned-ipa
+          path: release-assets/ios
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-portable-zip
+          path: release-assets/windows
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-arm64-dmg
+          path: release-assets/macos
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets/final
+          cp release-assets/android/*.apk release-assets/final/
+          cp release-assets/ios/*.ipa release-assets/final/
+          cp release-assets/windows/*.zip release-assets/final/
+          cp release-assets/macos/*.dmg release-assets/final/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: release-assets/final/*

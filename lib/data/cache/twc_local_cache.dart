@@ -1,0 +1,3 @@
+class TwcLocalCache {
+  const TwcLocalCache();
+}
